@@ -9,6 +9,7 @@ import sys
 import re
 from dataclasses import dataclass
 from collections import deque
+import socket
 import threading
 import time
 import signal
@@ -17,6 +18,9 @@ import math
 import logging
 import json
 import requests
+import configparser
+import bluetooth_utils
+
 
 print("---------------------------------------------")
 print("MiTemperature2 / ATC Thermometer version 3.1")
@@ -49,17 +53,19 @@ identicalCounters = {}
 MQTTClient = None
 MQTTTopic = None
 receiver = None
-subtopics = None
+subtopics = []
 mqttJSONDisabled = False
 sock = None  # from ATC
 lastBLEPaketReceived = 0
 BLERestartCounter = 1
-mode = "round"
+args = None  # populated in main()
+adress = None  # populated in main()
+connected = False  # run_device_mode()
+unconnectedTime = None  # run_device_mode() and watchdog
 
 
 def myMQTTPublish(topic, jsonMessage):
-	global subtopics
-	if len(subtopics) > 0:
+	if subtopics:
 		messageDict = json.loads(jsonMessage)
 		for subtopic in subtopics:
 			print("Topic:", subtopic)
@@ -70,7 +76,7 @@ def myMQTTPublish(topic, jsonMessage):
 
 def signal_handler(sig, frame):
 	if args.atc:
-		disable_le_scan(sock)
+		bluetooth_utils.disable_le_scan(sock)
 	sys.exit(0)
 
 
@@ -169,8 +175,8 @@ def keepingLEScanRunning():  # LE-Scanning gets disabled sometimes, especially i
 		now = time.time()
 		if now - lastBLEPaketReceived > args.watchdogtimer:
 			print(f"Watchdog: Did not receive any BLE Paket within {int(now - lastBLEPaketReceived)}s. Restarting BLE scan. Count: {BLERestartCounter}")
-			disable_le_scan(sock)
-			enable_le_scan(sock, filter_duplicates=False)
+			bluetooth_utils.disable_le_scan(sock)
+			bluetooth_utils.enable_le_scan(sock, filter_duplicates=False)
 			BLERestartCounter += 1
 			print("")
 			time.sleep(5)  # give some time to take effect
@@ -216,7 +222,6 @@ class MyDelegate(btle.DefaultDelegate):
 				# print("Temperatur unrounded: " + str(temp
 
 				if args.debounce:
-					global mode
 					temp *= 10
 					intpart = math.floor(temp)
 					fracpart = round(temp - intpart, 1)
@@ -225,6 +230,8 @@ class MyDelegate(btle.DefaultDelegate):
 						mode = "ceil"
 					elif fracpart <= 0.2:  # either 0.8 and 0.3 or 0.7 and 0.2 for best even distribution
 						mode = "trunc"
+					else:
+						mode = None
 					# print("Modus: " + mode)
 					if mode == "trunc":  # only a few times
 						temp = math.trunc(temp)
@@ -326,51 +333,50 @@ def MQTTOnDisconnect(client, userdata, rc):
 	print(f"MQTT disconnected, Client: {client} Userdata: {userdata} RC: {rc}")
 
 
-# Main loop --------
-parser = argparse.ArgumentParser(allow_abbrev=False)
-parser.add_argument("--device", "-d", help="Set the device MAC-Address in format AA:BB:CC:DD:EE:FF", metavar="AA:BB:CC:DD:EE:FF")
-parser.add_argument("--battery", "-b", help="Get estimated battery level, in ATC-Mode: Get battery level from device", metavar="", type=int, nargs="?", const=1)
-parser.add_argument("--count", "-c", help="Read/Receive N measurements and then exit script", metavar="N", type=int)
-parser.add_argument("--interface", "-i", help="Specifiy the interface number to use, e.g. 1 for hci1", metavar="N", type=int, default=0)
-parser.add_argument("--unreachable-count", "-urc", help="Exit after N unsuccessful connection tries", metavar="N", type=int, default=0)
-parser.add_argument("--mqttconfigfile", "-mcf", help="specify a configurationfile for MQTT-Broker")
+def make_argument_parser():
+	parser = argparse.ArgumentParser(allow_abbrev=False)
+	parser.add_argument("--device", "-d", help="Set the device MAC-Address in format AA:BB:CC:DD:EE:FF", metavar="AA:BB:CC:DD:EE:FF")
+	parser.add_argument("--battery", "-b", help="Get estimated battery level, in ATC-Mode: Get battery level from device", metavar="", type=int, nargs="?", const=1)
+	parser.add_argument("--count", "-c", help="Read/Receive N measurements and then exit script", metavar="N", type=int)
+	parser.add_argument("--interface", "-i", help="Specifiy the interface number to use, e.g. 1 for hci1", metavar="N", type=int, default=0)
+	parser.add_argument("--unreachable-count", "-urc", help="Exit after N unsuccessful connection tries", metavar="N", type=int, default=0)
+	parser.add_argument("--mqttconfigfile", "-mcf", help="specify a configurationfile for MQTT-Broker")
+
+	rounding = parser.add_argument_group("Rounding and debouncing")
+	rounding.add_argument("--round", "-r", help="Round temperature to one decimal place", action="store_true")
+	rounding.add_argument("--debounce", "-deb", help="Enable this option to get more stable temperature values, requires -r option", action="store_true")
+
+	offsetgroup = parser.add_argument_group("Offset calibration mode")
+	offsetgroup.add_argument("--offset", "-o", help="Enter an offset to the reported humidity value", type=int)
+
+	complexCalibrationGroup = parser.add_argument_group("2 Point Calibration")
+	complexCalibrationGroup.add_argument("--TwoPointCalibration", "-2p", help="Use complex calibration mode. All arguments below are required", action="store_true")
+	complexCalibrationGroup.add_argument("--calpoint1", "-p1", help="Enter the first calibration point", type=int)
+	complexCalibrationGroup.add_argument("--offset1", "-o1", help="Enter the offset for the first calibration point", type=int)
+	complexCalibrationGroup.add_argument("--calpoint2", "-p2", help="Enter the second calibration point", type=int)
+	complexCalibrationGroup.add_argument("--offset2", "-o2", help="Enter the offset for the second calibration point", type=int)
+
+	callbackgroup = parser.add_argument_group("Callback related arguments")
+	callbackgroup.add_argument("--callback", "-call", help="Pass the path to a program/script that will be called on each new measurement")
+	callbackgroup.add_argument("--httpcallback", "-http", help="Pass the URL to a program/script that will be called on each new measurement")
+	callbackgroup.add_argument("--name", "-n", help="Give this sensor a name reported to the callback script")
+	callbackgroup.add_argument("--skipidentical", "-skip", help="N consecutive identical measurements won't be reported to callbackfunction", metavar="N", type=int, default=0)
+	callbackgroup.add_argument("--influxdb", "-infl", help="Optimize for writing data to influxdb,1 timestamp optimization, 2 integer optimization", metavar="N", type=int, default=0)
+
+	atcgroup = parser.add_argument_group("ATC mode related arguments")
+	atcgroup.add_argument("--atc", "-a", help="Read the data of devices with custom ATC firmware flashed, use --battery to get battery level additionaly in percent", action="store_true")
+	atcgroup.add_argument("--watchdogtimer", "-wdt", metavar="X", type=int, help="Re-enable scanning after not receiving any BLE packet after X seconds")
+	atcgroup.add_argument("--devicelistfile", "-df", help="Specify a device list file giving further details to devices")
+	atcgroup.add_argument("--onlydevicelist", "-odl", help="Only read devices which are in the device list file", action="store_true")
+	atcgroup.add_argument("--rssi", "-rs", help="Report RSSI via callback", action="store_true")
+	return parser
 
 
-rounding = parser.add_argument_group("Rounding and debouncing")
-rounding.add_argument("--round", "-r", help="Round temperature to one decimal place", action="store_true")
-rounding.add_argument("--debounce", "-deb", help="Enable this option to get more stable temperature values, requires -r option", action="store_true")
-
-offsetgroup = parser.add_argument_group("Offset calibration mode")
-offsetgroup.add_argument("--offset", "-o", help="Enter an offset to the reported humidity value", type=int)
-
-complexCalibrationGroup = parser.add_argument_group("2 Point Calibration")
-complexCalibrationGroup.add_argument("--TwoPointCalibration", "-2p", help="Use complex calibration mode. All arguments below are required", action="store_true")
-complexCalibrationGroup.add_argument("--calpoint1", "-p1", help="Enter the first calibration point", type=int)
-complexCalibrationGroup.add_argument("--offset1", "-o1", help="Enter the offset for the first calibration point", type=int)
-complexCalibrationGroup.add_argument("--calpoint2", "-p2", help="Enter the second calibration point", type=int)
-complexCalibrationGroup.add_argument("--offset2", "-o2", help="Enter the offset for the second calibration point", type=int)
-
-callbackgroup = parser.add_argument_group("Callback related arguments")
-callbackgroup.add_argument("--callback", "-call", help="Pass the path to a program/script that will be called on each new measurement")
-callbackgroup.add_argument("--httpcallback", "-http", help="Pass the URL to a program/script that will be called on each new measurement")
-callbackgroup.add_argument("--name", "-n", help="Give this sensor a name reported to the callback script")
-callbackgroup.add_argument("--skipidentical", "-skip", help="N consecutive identical measurements won't be reported to callbackfunction", metavar="N", type=int, default=0)
-callbackgroup.add_argument("--influxdb", "-infl", help="Optimize for writing data to influxdb,1 timestamp optimization, 2 integer optimization", metavar="N", type=int, default=0)
-
-atcgroup = parser.add_argument_group("ATC mode related arguments")
-atcgroup.add_argument("--atc", "-a", help="Read the data of devices with custom ATC firmware flashed, use --battery to get battery level additionaly in percent", action="store_true")
-atcgroup.add_argument("--watchdogtimer", "-wdt", metavar="X", type=int, help="Re-enable scanning after not receiving any BLE packet after X seconds")
-atcgroup.add_argument("--devicelistfile", "-df", help="Specify a device list file giving further details to devices")
-atcgroup.add_argument("--onlydevicelist", "-odl", help="Only read devices which are in the device list file", action="store_true")
-atcgroup.add_argument("--rssi", "-rs", help="Report RSSI via callback", action="store_true")
-
-
-args = parser.parse_args()
-
-if args.devicelistfile or args.mqttconfigfile:
-	import configparser
-
-if args.mqttconfigfile:
+def setup_mqtt(args):
+	global mqttJSONDisabled
+	global MQTTClient
+	global MQTTTopic
+	global receiver
 	try:
 		import paho.mqtt.client as mqtt
 	except ImportError:
@@ -397,12 +403,8 @@ if args.mqttconfigfile:
 		if "nojson" in subtopics:
 			subtopics.remove("nojson")
 			mqttJSONDisabled = True
-
-	if len(receiver) == 0:
-		import socket
-
+	if not receiver:
 		receiver = socket.gethostname()
-
 	client = mqtt.Client(clientid)
 	client.on_connect = MQTTOnConnect
 	client.on_publish = MQTTOnPublish
@@ -413,53 +415,64 @@ if args.mqttconfigfile:
 	if len(lwt) > 0:
 		print(f"Using lastwill with topic: {lwt} and message: {lastwill}")
 		client.will_set(lwt, lastwill, qos=1)
-
 	client.connect_async(broker, port)
 	MQTTClient = client
 
 
-if args.device:
+def main():
+	parser = make_argument_parser()
+	args = parser.parse_args()
+
+	if args.mqttconfigfile:
+		setup_mqtt(args)
+
+	if args.TwoPointCalibration:
+		if not (args.calpoint1 and args.offset1 and args.calpoint2 and args.offset2):
+			print("In 2 Point calibration you have to enter 4 points")
+			sys.exit(1)
+		elif args.offset:
+			print("Offset calibration and 2 Point calibration can't be used together")
+			sys.exit(1)
+
+	if not args.name:
+		args.name = args.device
+
+	if args.callback or args.httpcallback:
+		dataThread = threading.Thread(target=thread_SendingData)
+		dataThread.start()
+
+	signal.signal(signal.SIGINT, signal_handler)
+
+	if args.device:
+		run_device_mode(args)
+	elif args.atc:
+		run_atc_mode(args)
+	else:
+		parser.print_help()
+		sys.exit(1)
+
+
+def run_device_mode(args):
+	global unconnectedTime
+	global connected
+	global adress
+
 	if re.match("[0-9a-fA-F]{2}([:]?)[0-9a-fA-F]{2}(\\1[0-9a-fA-F]{2}){4}$", args.device):
 		adress = args.device
 	else:
 		print("Please specify device MAC-Address in format AA:BB:CC:DD:EE:FF")
 		sys.exit(1)
-elif not args.atc:
-	parser.print_help()
-	sys.exit(1)
-
-if args.TwoPointCalibration:
-	if not (args.calpoint1 and args.offset1 and args.calpoint2 and args.offset2):
-		print("In 2 Point calibration you have to enter 4 points")
-		sys.exit(1)
-	elif args.offset:
-		print("Offset calibration and 2 Point calibration can't be used together")
-		sys.exit(1)
-if not args.name:
-	args.name = args.device
-
-if args.callback or args.httpcallback:
-	dataThread = threading.Thread(target=thread_SendingData)
-	dataThread.start()
-
-signal.signal(signal.SIGINT, signal_handler)
-
-if args.device:
-
 	p = btle.Peripheral()
 	cnt = 0
-
 	connected = False
 	# logging.basicConfig(level=logging.DEBUG)
 	logging.basicConfig(level=logging.ERROR)
 	logging.debug("Debug: Starting script...")
 	unconnectedTime = None
 	connectionLostCounter = 0
-
 	watchdogThread = threading.Thread(target=watchDog_Thread)
 	watchdogThread.start()
 	logging.debug("watchdogThread started")
-
 	while True:
 		try:
 			if not connected:
@@ -494,9 +507,11 @@ if args.device:
 			logging.debug(traceback.format_exc())
 
 		print("Waiting...")
-		# Perhaps do something else here
+	# Perhaps do something else here
 
-elif args.atc:
+
+def run_atc_mode(args):
+	global prev_data
 	print("Script started in ATC Mode")
 	print("----------------------------")
 	print("In this mode all devices within reach are read out, unless a devicelistfile and --onlydevicelist is specified.")
@@ -505,11 +520,7 @@ elif args.atc:
 	print('ATC mode usually requires root rights. If you want to use it with normal user rights, \nplease execute "sudo setcap cap_net_raw,cap_net_admin+eip $(eval readlink -f `which python3`)"')
 	print("You have to redo this step if you upgrade your python version.")
 	print("----------------------------")
-
-	import sys
 	import bluetooth._bluetooth as bluez
-
-	from bluetooth_utils import toggle_device, enable_le_scan, parse_le_advertising_events, disable_le_scan, raw_packet_to_str
 
 	advCounter = dict()
 	sensors = dict()
@@ -525,22 +536,17 @@ elif args.atc:
 		for key in sensors:
 			sensorsnew[key.upper()] = sensors[key]
 		sensors = sensorsnew
-
 	if args.onlydevicelist and not args.devicelistfile:
 		print("Error: --onlydevicelist requires --devicelistfile <devicelistfile>")
 		sys.exit(1)
-
 	dev_id = args.interface  # the bluetooth device is hci0
-	toggle_device(dev_id, True)
-
+	bluetooth_utils.toggle_device(dev_id, True)
 	try:
 		sock = bluez.hci_open_dev(dev_id)
 	except Exception:
 		print("Cannot open bluetooth device %i" % dev_id)
 		raise
-
-	enable_le_scan(sock, filter_duplicates=False)
-
+	bluetooth_utils.enable_le_scan(sock, filter_duplicates=False)
 	try:
 		prev_data = None
 
@@ -549,7 +555,7 @@ elif args.atc:
 			if args.watchdogtimer:
 				lastBLEPaketReceived = time.time()
 			lastBLEPaketReceived = time.time()
-			data_str = raw_packet_to_str(data)
+			data_str = bluetooth_utils.raw_packet_to_str(data)
 			preeamble = "10161a18"
 			paketStart = data_str.find(preeamble)
 			offset = paketStart + len(preeamble)
@@ -620,7 +626,7 @@ elif args.atc:
 					if args.mqttconfigfile:
 						jsonString = buildJSONString(measurement)
 						myMQTTPublish(currentMQTTTopic, jsonString)
-						# MQTTClient.publish(currentMQTTTopic,jsonString,1)
+					# MQTTClient.publish(currentMQTTTopic,jsonString,1)
 
 					# print("Length:", len(measurements))
 					print("")
@@ -632,6 +638,10 @@ elif args.atc:
 
 		# Blocking call (the given handler will be called each time a new LE
 		# advertisement packet is detected)
-		parse_le_advertising_events(sock, handler=le_advertise_packet_handler, debug=False)
+		bluetooth_utils.parse_le_advertising_events(sock, handler=le_advertise_packet_handler, debug=False)
 	except KeyboardInterrupt:
-		disable_le_scan(sock)
+		bluetooth_utils.disable_le_scan(sock)
+
+
+if __name__ == "__main__":
+	main()

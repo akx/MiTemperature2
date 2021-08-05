@@ -67,8 +67,6 @@ class Measurement:
 
 measurements = deque()
 # globalBatteryLevel=0
-previousMeasurements = {}
-identicalCounters = {}
 MQTTClient = None
 MQTTTopic = None
 receiver = None
@@ -95,7 +93,6 @@ def myMQTTPublish(topic, jsonMessage):
 
 def watchDog_Thread():
 	global unconnectedTime
-	global connected
 	while True:
 		logging.debug("watchdog_Thread")
 		logging.debug(f"unconnectedTime : {unconnectedTime}")
@@ -109,14 +106,19 @@ def watchDog_Thread():
 
 
 def thread_SendingData():
-	global previousMeasurements
-	global measurements
 	path = os.path.dirname(os.path.abspath(__file__))
+	previousMeasurements = {}
+	identicalCounters = {}
 
 	while True:
 		try:
-			ret = None
 			mea = measurements.popleft()
+		except IndexError:
+			time.sleep(1)
+			continue
+
+		try:
+			ret = None
 			if mea.sensorname in previousMeasurements:
 				prev = previousMeasurements[mea.sensorname]
 				# only send data when it has changed or X identical data has been skipped,
@@ -175,10 +177,6 @@ def thread_SendingData():
 				# replace() without changes is a shallow copy
 				previousMeasurements[mea.sensorname] = dataclasses.replace(mea)
 				identicalCounters[mea.sensorname] = 0
-
-		except IndexError:
-			# print("No Data")
-			time.sleep(1)
 		except Exception as e:
 			print(e)
 			print(traceback.format_exc())

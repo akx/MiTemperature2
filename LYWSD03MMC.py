@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -u
 #!/home/openhabian/Python3/Python-3.7.4/python -u
 # -u to unbuffer output. Otherwise when calling with nohup or redirecting output things are printed very lately or would even mixup
+import dataclasses
 
 from bluepy import btle
 import argparse
@@ -27,7 +28,7 @@ print("MiTemperature2 / ATC Thermometer version 3.1")
 print("---------------------------------------------")
 
 
-@dataclass
+@dataclass(frozen=True)
 class Measurement:
 	temperature: float
 	humidity: int
@@ -165,10 +166,8 @@ def thread_SendingData():
 				print(f"Data couldn't be send to Callback ({ret}), retrying...")
 				time.sleep(5)  # wait before trying again
 			else:  # data was sent
-				# using copy or deepcopy requires implementation in the class definition
-				previousMeasurements[mea.sensorname] = Measurement(
-					mea.temperature, mea.humidity, mea.voltage, mea.calibratedHumidity, mea.battery, mea.timestamp, mea.sensorname
-				)
+				# replace() without changes is a shallow copy
+				previousMeasurements[mea.sensorname] = dataclasses.replace(mea)
 				identicalCounters[mea.sensorname] = 0
 
 		except IndexError:
@@ -222,11 +221,10 @@ class MyDelegate(btle.DefaultDelegate):
 	def handleNotification(self, cHandle, data):
 		global measurements
 		try:
-			measurement = Measurement(0, 0, 0, 0, 0, 0, 0, 0)
 			if args.influxdb == 1:
-				measurement.timestamp = int((time.time() // 10) * 10)
+				timestamp = int((time.time() // 10) * 10)
 			else:
-				measurement.timestamp = int(time.time())
+				timestamp = int(time.time())
 			temp = int.from_bytes(data[0:2], byteorder="little", signed=True) / 100
 			# print("Temp received: " + str(temp))
 			if args.round:
@@ -257,32 +255,37 @@ class MyDelegate(btle.DefaultDelegate):
 			humidity = int.from_bytes(data[2:3], byteorder="little")
 			voltage = int.from_bytes(data[3:5], byteorder="little") / 1000.0
 			batteryLevel = min(int(round((voltage - 2.1), 2) * 100), 100)  # 3.1 or above --> 100% 2.1 --> 0 %
+			humidityCalibrated = humidity
+
+			if args.offset:
+				humidityCalibrated = humidity + args.offset
+
+			if args.TwoPointCalibration:
+				humidityCalibrated = calibrateHumidity2Points(humidity, args.offset1, args.offset2, args.calpoint1, args.calpoint2)
+
 			print(f"Temperature: {temp}")
 			print(f"Humidity: {humidity}")
 			print(f"Battery voltage: {voltage} V")
 			print(f"Battery level: {batteryLevel}")
-			measurement.temperature = temp
-			measurement.humidity = humidity
-			measurement.voltage = voltage
-			measurement.sensorname = args.name
-			measurement.battery = batteryLevel
 
-			if args.offset:
-				humidityCalibrated = humidity + args.offset
+			if humidityCalibrated != humidity:
 				print(f"Calibrated humidity: {humidityCalibrated}")
-				measurement.calibratedHumidity = humidityCalibrated
 
-			if args.TwoPointCalibration:
-				humidityCalibrated = calibrateHumidity2Points(humidity, args.offset1, args.offset2, args.calpoint1, args.calpoint2)
-				print(f"Calibrated humidity: {humidityCalibrated}")
-				measurement.calibratedHumidity = humidityCalibrated
+			measurement = Measurement(
+				temperature=temp,
+				humidity=humidity,
+				voltage=voltage,
+				calibratedHumidity=humidityCalibrated,
+				battery=batteryLevel,
+				timestamp=timestamp,
+				sensorname=args.name,
+				rssi=0,
+			)
 
 			if args.callback or args.httpcallback:
 				measurements.append(measurement)
 
 			if args.mqttconfigfile:
-				if measurement.calibratedHumidity == 0:
-					measurement.calibratedHumidity = measurement.humidity
 				jsonString = buildJSONString(measurement)
 				myMQTTPublish(MQTTTopic, jsonString)
 				# MQTTClient.publish(MQTTTopic,jsonString,1)
@@ -586,48 +589,54 @@ def run_atc_mode(args):
 		# temp = data_str[22:26].encode('utf-8')
 		# temperature = int.from_bytes(bytearray.fromhex(data_str[22:26]),byteorder='big') / 10.
 		global measurements
-		measurement = Measurement(0, 0, 0, 0, 0, 0, 0, 0)
 		if args.influxdb == 1:
-			measurement.timestamp = int((time.time() // 10) * 10)
+			timestamp = int((time.time() // 10) * 10)
 		else:
-			measurement.timestamp = int(time.time())
+			timestamp = int(time.time())
 
 		# temperature = int(data_str[22:26],16) / 10.
 		temperature = int.from_bytes(bytearray.fromhex(atcData_str[12:16]), byteorder="big", signed=True) / 10.0
 		humidity = int(atcData_str[16:18], 16)
 		batteryVoltage = int(atcData_str[20:24], 16) / 1000
 		batteryPercent = int(atcData_str[18:20], 16)
-		print(f"Temperature: {temperature}")
-		print(f"Humidity: {humidity}")
-		print("Battery voltage:", batteryVoltage, "V")
-		print(f"RSSI: {rssi} dBm")
-		print(f"Battery: {batteryPercent}%")
-		measurement.battery = batteryPercent
-		measurement.humidity = humidity
-		measurement.temperature = temperature
-		measurement.voltage = batteryVoltage
-		measurement.rssi = rssi
 
 		currentMQTTTopic = MQTTTopic
+		sensorname = mac
+		humidityCalibrated = humidity  # may be calibrated later
 		if mac in sensors:
 			sensor_info = sensors[mac]
 			try:
-				measurement.sensorname = sensor_info["sensorname"]
+				sensorname = sensor_info["sensorname"]
 			except KeyError:
-				measurement.sensorname = mac
+				pass
+
 			if "offset1" in sensor_info and "offset2" in sensor_info and "calpoint1" in sensor_info and "calpoint2" in sensor_info:
-				measurement.humidity = calibrateHumidity2Points(humidity, int(sensor_info["offset1"]), int(sensor_info["offset2"]), int(sensor_info["calpoint1"]), int(sensor_info["calpoint2"]))
-				print("Humidity calibrated (2 points calibration): ", measurement.humidity)
+				humidityCalibrated = calibrateHumidity2Points(humidity, int(sensor_info["offset1"]), int(sensor_info["offset2"]), int(sensor_info["calpoint1"]), int(sensor_info["calpoint2"]))
 			elif "humidityOffset" in sensor_info:
-				measurement.humidity = humidity + int(sensor_info["humidityOffset"])
-				print("Humidity calibrated (offset calibration): ", measurement.humidity)
+				humidityCalibrated = humidity + int(sensor_info["humidityOffset"])
+
 			if "topic" in sensor_info:
 				currentMQTTTopic = sensor_info["topic"]
-		else:
-			measurement.sensorname = mac
 
-		if measurement.calibratedHumidity == 0:
-			measurement.calibratedHumidity = measurement.humidity
+		print(f"Temperature: {temperature}")
+		print(f"Humidity: {humidity}")
+		print(f"Battery voltage: {batteryVoltage} V")
+		print(f"RSSI: {rssi} dBm")
+		print(f"Battery: {batteryPercent}%")
+
+		if humidityCalibrated != humidity:
+			print("Humidity calibrated: ", humidityCalibrated)
+
+		measurement = Measurement(
+			temperature=temperature,
+			humidity=humidity,
+			voltage=batteryVoltage,
+			calibratedHumidity=humidityCalibrated,
+			battery=batteryPercent,
+			timestamp=timestamp,
+			sensorname=sensorname,
+			rssi=rssi,
+		)
 
 		if args.callback or args.httpcallback:
 			measurements.append(measurement)

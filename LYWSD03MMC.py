@@ -250,7 +250,6 @@ class MyDelegate(btle.DefaultDelegate):
 		# ... initialise here
 
 	def handleNotification(self, cHandle, data):
-		global measurements
 		try:
 			if args.influxdb == 1:
 				timestamp = int((time.time() // 10) * 10)
@@ -281,14 +280,7 @@ class MyDelegate(btle.DefaultDelegate):
 			)
 
 			measurement.print()
-
-			if args.callback or args.httpcallback:
-				measurements.append(measurement)
-
-			if args.mqttconfigfile:
-				jsonString = buildJSONString(measurement)
-				myMQTTPublish(MQTTTopic, jsonString)
-				# MQTTClient.publish(MQTTTopic,jsonString,1)
+			process_measurement(measurement, mqtt_topic=MQTTTopic)
 
 		except Exception as e:
 			print("Fehler")
@@ -345,6 +337,17 @@ def MQTTOnPublish(client, userdata, mid):
 
 def MQTTOnDisconnect(client, userdata, rc):
 	print(f"MQTT disconnected, Client: {client} Userdata: {userdata} RC: {rc}")
+
+
+def process_measurement(measurement, mqtt_topic: str = None):
+	if not mqtt_topic:
+		mqtt_topic = MQTTTopic
+
+	if args.callback or args.httpcallback:
+		measurements.append(measurement)
+	if args.mqttconfigfile:
+		jsonString = buildJSONString(measurement)
+		myMQTTPublish(mqtt_topic, jsonString)
 
 
 def make_argument_parser():
@@ -586,7 +589,6 @@ def run_atc_mode(args):
 		# print("AdvNumber: ", advNumber)
 		# temp = data_str[22:26].encode('utf-8')
 		# temperature = int.from_bytes(bytearray.fromhex(data_str[22:26]),byteorder='big') / 10.
-		global measurements
 		if args.influxdb == 1:
 			timestamp = int((time.time() // 10) * 10)
 		else:
@@ -630,15 +632,8 @@ def run_atc_mode(args):
 
 		measurement.print()
 
-		if args.callback or args.httpcallback:
-			measurements.append(measurement)
+		process_measurement(measurement, currentMQTTTopic)
 
-		if args.mqttconfigfile:
-			jsonString = buildJSONString(measurement)
-			myMQTTPublish(currentMQTTTopic, jsonString)
-		# MQTTClient.publish(currentMQTTTopic,jsonString,1)
-
-		# print("Length:", len(measurements))
 		print("")
 
 	try:

@@ -1,89 +1,70 @@
 #!/usr/local/bin/python3.7m
 
-import os
-import re
-import requests
-import time
 import sys
+import time
+
+import requests
 
 veraip = "192.168.1.39"
 port = 3480
 temperaturedeviceid = 769
 humiditydeviceid = 772
 
+
 # Quick and dirty script to send data to vera sensors
 # sensorname=$2 temperature=$3,humidity=$4,calibratedHumidity=$5,batterylevel=$6 $7
 
-temperature = sys.argv[3]  # change to sys.argv[5] for calibrated
-humidity = sys.argv[4]
-batterylevel = sys.argv[6]
 
-# send temperature value
-res = requests.get(
-    "http://"
-    + veraip
-    + ":"
-    + str(port)
-    + "/data_request?id=variableset&DeviceNum="
-    + str(temperaturedeviceid)
-    + "&serviceId=urn:upnp-org:serviceId:TemperatureSensor1&Variable=CurrentTemperature&Value="
-    + str(temperature)
-)
+def do_data_request(values):
+	# send temperature value
+	res = requests.get(
+		url=f"https://{veraip}:{port}/data_request",
+		params=values,
+	)
+	# TODO: error checking?
 
-# send timestamp
-res = requests.get(
-    "http://"
-    + veraip
-    + ":"
-    + str(port)
-    + "/data_request?id=variableset&DeviceNum="
-    + str(temperaturedeviceid)
-    + "&serviceId=urn:micasaverde-com:serviceId:HaDevice1&Variable=LastUpdate&Value="
-    + str(int(time.time()))
-)
 
-# send humidity value
-res = requests.get(
-    "http://"
-    + veraip
-    + ":"
-    + str(port)
-    + "/data_request?id=variableset&DeviceNum="
-    + str(humiditydeviceid)
-    + "&serviceId=urn:micasaverde-com:serviceId:HumiditySensor1&Variable=CurrentLevel&Value="
-    + str(humidity)
-)
+def main():
+	temperature = sys.argv[3]  # change to sys.argv[5] for calibrated
+	humidity = sys.argv[4]
+	batterylevel = sys.argv[6]
+	timestamp = int(time.time())
 
-# change update timestamp
-res = requests.get(
-    "http://"
-    + veraip
-    + ":"
-    + str(port)
-    + "/data_request?id=variableset&DeviceNum="
-    + str(humiditydeviceid)
-    + "&serviceId=urn:micasaverde-com:serviceId:HaDevice1&Variable=LastUpdate&Value="
-    + str(int(time.time()))
-)
+	# send temperature value
+	do_data_request({
+		"id": "variableset",
+		"DeviceNum": temperaturedeviceid,
+		"serviceId": "urn:upnp-org:serviceId:TemperatureSensor1",
+		"Variable": "CurrentTemperature",
+		"Value": temperature,
+	})
 
-# send batterylevel to temp and humidity virtual sensors
-res = requests.get(
-    "http://"
-    + veraip
-    + ":"
-    + str(port)
-    + "/data_request?id=variableset&DeviceNum="
-    + str(temperaturedeviceid)
-    + "&serviceId=urn:micasaverde-com:serviceId:HaDevice1&Variable=BatteryLevel&Value="
-    + str(batterylevel)
-)
-res = requests.get(
-    "http://"
-    + veraip
-    + ":"
-    + str(port)
-    + "/data_request?id=variableset&DeviceNum="
-    + str(humiditydeviceid)
-    + "&serviceId=urn:micasaverde-com:serviceId:HaDevice1&Variable=BatteryLevel&Value="
-    + str(batterylevel)
-)
+	# send humidity value
+	do_data_request({
+		"id": "variableset",
+		"DeviceNum": humiditydeviceid,
+		"serviceId": "urn:micasaverde-com:serviceId:HumiditySensor1",
+		"Variable": "CurrentLevel",
+		"Value": humidity,
+	})
+
+	# send battery and timestamp to temp and humidity virtual sensors
+	for device in (humiditydeviceid, temperaturedeviceid):
+		do_data_request({
+			"id": "variableset",
+			"DeviceNum": device,
+			"serviceId": "urn:micasaverde-com:serviceId:HaDevice1",
+			"Variable": "LastUpdate",
+			"Value": timestamp,
+		})
+		do_data_request({
+			"id": "variableset",
+			"DeviceNum": device,
+			"serviceId": "urn:micasaverde-com:serviceId:HaDevice1",
+			"Variable": "BatteryLevel",
+			"Value": batterylevel,
+		})
+
+
+if __name__ == '__main__':
+	main()

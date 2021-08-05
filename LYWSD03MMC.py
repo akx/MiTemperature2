@@ -226,6 +226,31 @@ def calibrateHumidity2Points(humidity, offset1, offset2, calpoint1, calpoint2):
 	return humidityCalibrated
 
 
+def round_and_debounce_temp(temp: float, round_mode: bool, debounce_mode: bool) -> float:
+	if round_mode:
+		if not debounce_mode:
+			return round(temp, 1)
+
+		temp *= 10
+		intpart = math.floor(temp)
+		fracpart = round(temp - intpart, 1)
+		if fracpart >= 0.7:
+			mode = "ceil"
+		elif fracpart <= 0.2:  # either 0.8 and 0.3 or 0.7 and 0.2 for best even distribution
+			mode = "trunc"
+		else:
+			mode = None
+		# print("Modus: " + mode)
+		if mode == "trunc":  # only a few times
+			temp = math.trunc(temp)
+		elif mode == "ceil":
+			temp = math.ceil(temp)
+		else:
+			temp = round(temp, 0)
+		temp /= 10.0
+	return temp
+
+
 class MyDelegate(btle.DefaultDelegate):
 	def __init__(self, params):
 		btle.DefaultDelegate.__init__(self)
@@ -239,32 +264,7 @@ class MyDelegate(btle.DefaultDelegate):
 			else:
 				timestamp = int(time.time())
 			temp = int.from_bytes(data[0:2], byteorder="little", signed=True) / 100
-			# print("Temp received: " + str(temp))
-			if args.round:
-				# print("Temperatur unrounded: " + str(temp
-
-				if args.debounce:
-					temp *= 10
-					intpart = math.floor(temp)
-					fracpart = round(temp - intpart, 1)
-					# print("Fracpart: " + str(fracpart))
-					if fracpart >= 0.7:
-						mode = "ceil"
-					elif fracpart <= 0.2:  # either 0.8 and 0.3 or 0.7 and 0.2 for best even distribution
-						mode = "trunc"
-					else:
-						mode = None
-					# print("Modus: " + mode)
-					if mode == "trunc":  # only a few times
-						temp = math.trunc(temp)
-					elif mode == "ceil":
-						temp = math.ceil(temp)
-					else:
-						temp = round(temp, 0)
-					temp /= 10.0
-					# print("Debounced temp: " + str(temp))
-				else:
-					temp = round(temp, 1)
+			temp = round_and_debounce_temp(temp, round_mode=args.round, debounce_mode=args.debounce)
 			humidity = int.from_bytes(data[2:3], byteorder="little")
 			voltage = int.from_bytes(data[3:5], byteorder="little") / 1000.0
 			batteryLevel = min(int(round((voltage - 2.1), 2) * 100), 100)  # 3.1 or above --> 100% 2.1 --> 0 %
@@ -603,6 +603,7 @@ def run_atc_mode(args):
 
 		# temperature = int(data_str[22:26],16) / 10.
 		temperature = int.from_bytes(bytearray.fromhex(atcData_str[12:16]), byteorder="big", signed=True) / 10.0
+		temperature = round_and_debounce_temp(temperature, round_mode=args.round, debounce_mode=args.debounce)
 		humidity = int(atcData_str[16:18], 16)
 		batteryVoltage = int(atcData_str[20:24], 16) / 1000
 		batteryPercent = int(atcData_str[18:20], 16)

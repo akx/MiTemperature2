@@ -39,7 +39,13 @@ class Measurement:
 	rssi: int = 0
 
 	def __eq__(self, other):  # rssi may be different, so exclude it from comparison
-		if self.temperature == other.temperature and self.humidity == other.humidity and self.calibratedHumidity == other.calibratedHumidity and self.battery == other.battery and self.sensorname == other.sensorname:
+		if (
+			self.temperature == other.temperature
+			and self.humidity == other.humidity
+			and self.calibratedHumidity == other.calibratedHumidity
+			and self.battery == other.battery
+			and self.sensorname == other.sensorname
+		):
 			# in atc mode also exclude voltage as it changes often due to frequent measurements
 			return True if args.atc else (self.voltage == other.voltage)
 		else:
@@ -106,7 +112,9 @@ def thread_SendingData():
 			mea = measurements.popleft()
 			if mea.sensorname in previousMeasurements:
 				prev = previousMeasurements[mea.sensorname]
-				if mea == prev and identicalCounters[mea.sensorname] < args.skipidentical:  # only send data when it has changed or X identical data has been skipped, ~10 packets per minute, 50 packets --> writing at least every 5 minutes
+				# only send data when it has changed or X identical data has been skipped,
+				# ~10 packets per minute, 50 packets --> writing at least every 5 minutes
+				if mea == prev and identicalCounters[mea.sensorname] < args.skipidentical:
 					print(f"Measurements for {mea.sensorname} are identical; don't send data\n")
 					identicalCounters[mea.sensorname] += 1
 					continue
@@ -157,7 +165,10 @@ def thread_SendingData():
 				print(f"Data couldn't be send to Callback ({ret}), retrying...")
 				time.sleep(5)  # wait before trying again
 			else:  # data was sent
-				previousMeasurements[mea.sensorname] = Measurement(mea.temperature, mea.humidity, mea.voltage, mea.calibratedHumidity, mea.battery, mea.timestamp, mea.sensorname)  # using copy or deepcopy requires implementation in the class definition
+				# using copy or deepcopy requires implementation in the class definition
+				previousMeasurements[mea.sensorname] = Measurement(
+					mea.temperature, mea.humidity, mea.voltage, mea.calibratedHumidity, mea.battery, mea.timestamp, mea.sensorname
+				)
 				identicalCounters[mea.sensorname] = 0
 
 		except IndexError:

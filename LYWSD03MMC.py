@@ -511,7 +511,6 @@ def run_device_mode(args):
 
 
 def run_atc_mode(args):
-	global prev_data
 	print("Script started in ATC Mode")
 	print("----------------------------")
 	print("In this mode all devices within reach are read out, unless a devicelistfile and --onlydevicelist is specified.")
@@ -547,90 +546,90 @@ def run_atc_mode(args):
 		print("Cannot open bluetooth device %i" % dev_id)
 		raise
 	bluetooth_utils.enable_le_scan(sock, filter_duplicates=False)
+
+	def le_advertise_packet_handler(mac, adv_type, data, rssi):
+		global lastBLEPaketReceived
+		lastBLEPaketReceived = time.time()
+		data_str = bluetooth_utils.raw_packet_to_str(data)
+		preeamble = "10161a18"
+		paketStart = data_str.find(preeamble)
+		offset = paketStart + len(preeamble)
+		# print("reveived BLE packet")+
+		atcData_str = data_str[offset : offset + 26]
+		ATCPaketMAC = atcData_str[0:12].upper()
+		macStr = mac.replace(":", "").upper()
+		atcIdentifier = data_str[(offset - 4) : offset].upper()
+
+		if ((atcIdentifier != "1A18" or ATCPaketMAC != macStr) or args.onlydevicelist) and (
+			(atcIdentifier != "1A18" or mac not in sensors) or len(atcData_str) != 26
+		):  # skip data not from ATC devices, double checked
+			return
+
+		advNumber = atcData_str[-2:]
+		lastAdvNumber = advCounter.get(macStr)
+		if lastAdvNumber == advNumber:  # Nothing to do here
+			return
+		advCounter[macStr] = advNumber
+		print(f"BLE packet: {mac} {adv_type:02x} {data_str} {rssi:d}")
+		# print("AdvNumber: ", advNumber)
+		# temp = data_str[22:26].encode('utf-8')
+		# temperature = int.from_bytes(bytearray.fromhex(data_str[22:26]),byteorder='big') / 10.
+		global measurements
+		measurement = Measurement(0, 0, 0, 0, 0, 0, 0, 0)
+		if args.influxdb == 1:
+			measurement.timestamp = int((time.time() // 10) * 10)
+		else:
+			measurement.timestamp = int(time.time())
+
+		# temperature = int(data_str[22:26],16) / 10.
+		temperature = int.from_bytes(bytearray.fromhex(atcData_str[12:16]), byteorder="big", signed=True) / 10.0
+		humidity = int(atcData_str[16:18], 16)
+		batteryVoltage = int(atcData_str[20:24], 16) / 1000
+		batteryPercent = int(atcData_str[18:20], 16)
+		print(f"Temperature: {temperature}")
+		print(f"Humidity: {humidity}")
+		print("Battery voltage:", batteryVoltage, "V")
+		print(f"RSSI: {rssi} dBm")
+		print(f"Battery: {batteryPercent}%")
+		measurement.battery = batteryPercent
+		measurement.humidity = humidity
+		measurement.temperature = temperature
+		measurement.voltage = batteryVoltage
+		measurement.rssi = rssi
+
+		currentMQTTTopic = MQTTTopic
+		if mac in sensors:
+			sensor_info = sensors[mac]
+			try:
+				measurement.sensorname = sensor_info["sensorname"]
+			except KeyError:
+				measurement.sensorname = mac
+			if "offset1" in sensor_info and "offset2" in sensor_info and "calpoint1" in sensor_info and "calpoint2" in sensor_info:
+				measurement.humidity = calibrateHumidity2Points(humidity, int(sensor_info["offset1"]), int(sensor_info["offset2"]), int(sensor_info["calpoint1"]), int(sensor_info["calpoint2"]))
+				print("Humidity calibrated (2 points calibration): ", measurement.humidity)
+			elif "humidityOffset" in sensor_info:
+				measurement.humidity = humidity + int(sensor_info["humidityOffset"])
+				print("Humidity calibrated (offset calibration): ", measurement.humidity)
+			if "topic" in sensor_info:
+				currentMQTTTopic = sensor_info["topic"]
+		else:
+			measurement.sensorname = mac
+
+		if measurement.calibratedHumidity == 0:
+			measurement.calibratedHumidity = measurement.humidity
+
+		if args.callback or args.httpcallback:
+			measurements.append(measurement)
+
+		if args.mqttconfigfile:
+			jsonString = buildJSONString(measurement)
+			myMQTTPublish(currentMQTTTopic, jsonString)
+		# MQTTClient.publish(currentMQTTTopic,jsonString,1)
+
+		# print("Length:", len(measurements))
+		print("")
+
 	try:
-		prev_data = None
-
-		def le_advertise_packet_handler(mac, adv_type, data, rssi):
-			global lastBLEPaketReceived
-			if args.watchdogtimer:
-				lastBLEPaketReceived = time.time()
-			lastBLEPaketReceived = time.time()
-			data_str = bluetooth_utils.raw_packet_to_str(data)
-			preeamble = "10161a18"
-			paketStart = data_str.find(preeamble)
-			offset = paketStart + len(preeamble)
-			# print("reveived BLE packet")+
-			atcData_str = data_str[offset : offset + 26]
-			ATCPaketMAC = atcData_str[0:12].upper()
-			macStr = mac.replace(":", "").upper()
-			atcIdentifier = data_str[(offset - 4) : offset].upper()
-
-			if (atcIdentifier == "1A18" and ATCPaketMAC == macStr) and not args.onlydevicelist or (atcIdentifier == "1A18" and mac in sensors) and len(atcData_str) == 26:  # only Data from ATC devices, double checked
-				advNumber = atcData_str[-2:]
-				if macStr in advCounter:
-					lastAdvNumber = advCounter[macStr]
-				else:
-					lastAdvNumber = None
-				if lastAdvNumber != advNumber:
-					advCounter[macStr] = advNumber
-					print(f"BLE packet: {mac} {adv_type:02x} {data_str} {rssi:d}")
-					# print("AdvNumber: ", advNumber)
-					# temp = data_str[22:26].encode('utf-8')
-					# temperature = int.from_bytes(bytearray.fromhex(data_str[22:26]),byteorder='big') / 10.
-					global measurements
-					measurement = Measurement(0, 0, 0, 0, 0, 0, 0, 0)
-					if args.influxdb == 1:
-						measurement.timestamp = int((time.time() // 10) * 10)
-					else:
-						measurement.timestamp = int(time.time())
-
-					# temperature = int(data_str[22:26],16) / 10.
-					temperature = int.from_bytes(bytearray.fromhex(atcData_str[12:16]), byteorder="big", signed=True) / 10.0
-					humidity = int(atcData_str[16:18], 16)
-					batteryVoltage = int(atcData_str[20:24], 16) / 1000
-					batteryPercent = int(atcData_str[18:20], 16)
-					print(f"Temperature: {temperature}")
-					print(f"Humidity: {humidity}")
-					print("Battery voltage:", batteryVoltage, "V")
-					print(f"RSSI: {rssi} dBm")
-					print(f"Battery: {batteryPercent}%")
-					measurement.battery = batteryPercent
-					measurement.humidity = humidity
-					measurement.temperature = temperature
-					measurement.voltage = batteryVoltage
-					measurement.rssi = rssi
-
-					currentMQTTTopic = MQTTTopic
-					if mac in sensors:
-						try:
-							measurement.sensorname = sensors[mac]["sensorname"]
-						except KeyError:
-							measurement.sensorname = mac
-						if "offset1" in sensors[mac] and "offset2" in sensors[mac] and "calpoint1" in sensors[mac] and "calpoint2" in sensors[mac]:
-							measurement.humidity = calibrateHumidity2Points(humidity, int(sensors[mac]["offset1"]), int(sensors[mac]["offset2"]), int(sensors[mac]["calpoint1"]), int(sensors[mac]["calpoint2"]))
-							print("Humidity calibrated (2 points calibration): ", measurement.humidity)
-						elif "humidityOffset" in sensors[mac]:
-							measurement.humidity = humidity + int(sensors[mac]["humidityOffset"])
-							print("Humidity calibrated (offset calibration): ", measurement.humidity)
-						if "topic" in sensors[mac]:
-							currentMQTTTopic = sensors[mac]["topic"]
-					else:
-						measurement.sensorname = mac
-
-					if measurement.calibratedHumidity == 0:
-						measurement.calibratedHumidity = measurement.humidity
-
-					if args.callback or args.httpcallback:
-						measurements.append(measurement)
-
-					if args.mqttconfigfile:
-						jsonString = buildJSONString(measurement)
-						myMQTTPublish(currentMQTTTopic, jsonString)
-					# MQTTClient.publish(currentMQTTTopic,jsonString,1)
-
-					# print("Length:", len(measurements))
-					print("")
-
 		if args.watchdogtimer:
 			keepingLEScanRunningThread = threading.Thread(target=keepingLEScanRunning)
 			keepingLEScanRunningThread.start()

@@ -13,7 +13,6 @@ from collections import deque
 import socket
 import threading
 import time
-import signal
 import traceback
 import math
 import logging
@@ -92,12 +91,6 @@ def myMQTTPublish(topic, jsonMessage):
 			MQTTClient.publish(f"{topic}/{subtopic}", messageDict[subtopic], 0)
 	if not mqttJSONDisabled:
 		MQTTClient.publish(topic, jsonMessage, 1)
-
-
-def signal_handler(sig, frame):
-	if args.atc:
-		bluetooth_utils.disable_le_scan(sock)
-	sys.exit(0)
 
 
 def watchDog_Thread():
@@ -462,8 +455,6 @@ def main():
 		dataThread = threading.Thread(target=thread_SendingData)
 		dataThread.start()
 
-	signal.signal(signal.SIGINT, signal_handler)
-
 	if args.device:
 		run_device_mode(args)
 	elif args.atc:
@@ -659,7 +650,7 @@ def run_atc_mode(args):
 		# Blocking call (the given handler will be called each time a new LE
 		# advertisement packet is detected)
 		bluetooth_utils.parse_le_advertising_events(sock, handler=le_advertise_packet_handler, debug=False)
-	except KeyboardInterrupt:
+	finally:
 		bluetooth_utils.disable_le_scan(sock)
 
 

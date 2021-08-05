@@ -243,10 +243,6 @@ def round_and_debounce_temp(temp: float, round_mode: bool, debounce_mode: bool) 
 
 
 class MyDelegate(btle.DefaultDelegate):
-	def __init__(self, params):
-		btle.DefaultDelegate.__init__(self)
-		# ... initialise here
-
 	def handleNotification(self, cHandle, data):
 		try:
 			if args.influxdb == 1:
@@ -305,7 +301,7 @@ def connect():
 	val = b"\x01\x00"
 	p.writeCharacteristic(0x0038, val, True)  # enable notifications of Temperature, Humidity and Battery voltage
 	p.writeCharacteristic(0x0046, b"\xf4\x01\x00", True)
-	p.withDelegate(MyDelegate("abc"))
+	p.withDelegate(MyDelegate())
 	return p
 
 

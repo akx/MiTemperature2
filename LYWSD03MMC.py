@@ -52,6 +52,19 @@ class Measurement:
 		else:
 			return False
 
+	def print(self):
+		print(f"Temperature: {self.temperature}")
+		print(f"Humidity: {self.humidity}")
+		if self.voltage:
+			print(f"Battery voltage: {self.voltage} V")
+		if self.battery:
+			print(f"Battery: {self.battery}%")
+		if self.rssi:
+			print(f"RSSI: {self.rssi} dBm")
+		if self.calibratedHumidity != self.humidity:
+			print(f"Humidity calibrated: {self.calibratedHumidity}")
+
+
 
 measurements = deque()
 # globalBatteryLevel=0
@@ -263,14 +276,6 @@ class MyDelegate(btle.DefaultDelegate):
 			if args.TwoPointCalibration:
 				humidityCalibrated = calibrateHumidity2Points(humidity, args.offset1, args.offset2, args.calpoint1, args.calpoint2)
 
-			print(f"Temperature: {temp}")
-			print(f"Humidity: {humidity}")
-			print(f"Battery voltage: {voltage} V")
-			print(f"Battery level: {batteryLevel}")
-
-			if humidityCalibrated != humidity:
-				print(f"Calibrated humidity: {humidityCalibrated}")
-
 			measurement = Measurement(
 				temperature=temp,
 				humidity=humidity,
@@ -281,6 +286,8 @@ class MyDelegate(btle.DefaultDelegate):
 				sensorname=args.name,
 				rssi=0,
 			)
+
+			measurement.print()
 
 			if args.callback or args.httpcallback:
 				measurements.append(measurement)
@@ -618,15 +625,6 @@ def run_atc_mode(args):
 			if "topic" in sensor_info:
 				currentMQTTTopic = sensor_info["topic"]
 
-		print(f"Temperature: {temperature}")
-		print(f"Humidity: {humidity}")
-		print(f"Battery voltage: {batteryVoltage} V")
-		print(f"RSSI: {rssi} dBm")
-		print(f"Battery: {batteryPercent}%")
-
-		if humidityCalibrated != humidity:
-			print("Humidity calibrated: ", humidityCalibrated)
-
 		measurement = Measurement(
 			temperature=temperature,
 			humidity=humidity,
@@ -637,6 +635,8 @@ def run_atc_mode(args):
 			sensorname=sensorname,
 			rssi=rssi,
 		)
+
+		measurement.print()
 
 		if args.callback or args.httpcallback:
 			measurements.append(measurement)

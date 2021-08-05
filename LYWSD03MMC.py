@@ -51,6 +51,10 @@ MQTTTopic = None
 receiver = None
 subtopics = None
 mqttJSONDisabled = False
+sock = None  # from ATC
+lastBLEPaketReceived = 0
+BLERestartCounter = 1
+mode = "round"
 
 
 def myMQTTPublish(topic, jsonMessage):
@@ -158,11 +162,6 @@ def thread_SendingData():
 			print(traceback.format_exc())
 
 
-sock = None  # from ATC
-lastBLEPaketReceived = 0
-BLERestartCounter = 1
-
-
 def keepingLEScanRunning():  # LE-Scanning gets disabled sometimes, especially if you have a lot of BLE connections, this thread periodically enables BLE scanning again
 	global BLERestartCounter
 	while True:
@@ -196,9 +195,6 @@ def calibrateHumidity2Points(humidity, offset1, offset2, calpoint1, calpoint2):
 		humidityCalibrated = 0
 	humidityCalibrated = int(round(humidityCalibrated, 0))
 	return humidityCalibrated
-
-
-mode = "round"
 
 
 class MyDelegate(btle.DefaultDelegate):
@@ -290,9 +286,6 @@ def kill_bluepy_helper():
 		logging.debug(f"Killed bluepy with pid: {bluepypid}")
 	except IndexError:  # Should normally occur because we're disconnected
 		logging.debug("Couldn't find pid of bluepy-helper")
-
-
-# Initialisation  -------
 
 
 def connect():
